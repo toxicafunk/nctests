@@ -1,0 +1,7 @@
+.ensime
+.ensime_cache/
+jars.txt
+.idea/
+lib_managed/
+project/target/
+target/

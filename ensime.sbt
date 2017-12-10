@@ -1,0 +1,1 @@
+ensimeIgnoreScalaMismatch := true
