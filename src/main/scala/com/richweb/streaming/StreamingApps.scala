@@ -15,9 +15,13 @@ import org.apache.spark.rdd.RDD
 import org.http4s.circe._
 import scala.concurrent.duration._
 
-trait Mock
-case class Greeting ( message: String, user: String) extends Mock
-case class Now ( now: String, user: String) extends Mock
+trait Mock {
+  val user: String
+}
+
+case class Greeting(message: String, user: String) extends Mock
+
+case class Now(now: String, user: String) extends Mock
 
 object StreamingApps {
 
@@ -43,6 +47,47 @@ object StreamingApps {
     client.expect(target)(jsonOf[Now])
   }
 
+  type Key = String
+  type CurrentState = (Int, String)
+
+  def updateFunction(newValues: Seq[Mock], currentState: Option[CurrentState]): Option[CurrentState] = {
+    currentState match {
+      case None => {
+        val state: Option[(Int, String)] = newValues.foldLeft(Option((0, "")))((acc, mock) => {
+          //log.info(s"NONE: $mock")
+          mock match {
+            case Greeting(message, user) => Some((acc.get._1 + 1, s"$message ${acc.get._2}"))
+            case Now(now, user) => Some((acc.get._1 + 1, s"${acc.get._2} $now"))
+          }
+        })
+        //log.info(s"NONE: $state")
+        state
+      }
+      case Some((1, msg)) => {
+        val state: Option[(Int, String)] = newValues
+          .foldLeft(Option(1, msg))((acc, mock) => {
+            //log.info(s"1: $mock")
+            mock match {
+              case Greeting(message, user) => Some((acc.get._1 + 1, s"$message ${acc.get._2}"))
+              case Now(now, user) => Some((acc.get._1 + 1, s"${acc.get._2} $now"))
+            }
+          })
+        //log.info(s"1: $state")
+        state
+      }
+      case Some((2, msg)) => {
+        //log.info(s"2: $msg");
+        val state: Option[(Int, String)] = newValues.foldLeft(None)((acc, mock) => None)
+        //log.info(s"2: $state")
+        state
+      }
+      case Some(_) => {
+        //log.info(s"DONE")
+        None
+      }
+    }
+  }
+
   //def callGreeting = (call("http://localhost:9595/hello/") _).andThen(t => t.map(s => ))
   //def callDate = call("http://localhost:9090/now/") _
 
@@ -53,10 +98,10 @@ object StreamingApps {
     // Create the Spark Session and the spark context
     val spark = SparkSession
       .builder
-        //.config("spark.rpc.numRetries", 2)
-        //.config("spark.rpc.retry.wait", 60)
-        .config("spark.task.maxFailures", 2)
-        .config("spark.scheduler.maxRegisteredResourcesWaitingTime", 70)
+      //.config("spark.rpc.numRetries", 2)
+      //.config("spark.rpc.retry.wait", 60)
+      .config("spark.task.maxFailures", 2)
+      .config("spark.scheduler.maxRegisteredResourcesWaitingTime", 70)
       .appName(getClass.getSimpleName)
       .getOrCreate()
 
@@ -81,30 +126,34 @@ object StreamingApps {
     val input = stream.map(s => {
       val tup = s.split(" ")
       (tup(0), tup(1))
-    })cache()
+    }) cache()
 
-    val greetingList: DStream[Greeting] = input
+    val greetingList: DStream[(String, Mock)] = input
       .filter(t => t._2 == "g" || t._2 == "b")
       .map(t => callGreeting(t._1))
       .map(_.unsafeRun())
+      .map(g => (g.user, g.asInstanceOf[Mock]))
+      .cache()
 
-    val dateList: DStream[Now] = input
+    val dateList: DStream[(String, Mock)] = input
       .filter(t => t._2 == "d" || t._2 == "b")
       .map(t => callDate(t._1))
       .map(_.unsafeRun())
+      .map(d => (d.user, d.asInstanceOf[Mock]))
+      .cache()
 
-    /*val currentTime = new Time(LocalDateTime.now().toEpochSecond(ZoneOffset.UTC))
-    greetingList.slice(currentTime, currentTime.-(Seconds(10)))*/
-
-    val grouped: DStream[(String, Iterable[String])] = greetingList
-      .map(g => (g.user, g.message))
-      .union(dateList.map(d => (d.user, d.now)))
-      .groupByKey()
-      //.groupByKeyAndWindow(Seconds(60), Seconds(180)).cache()
-
-    grouped.foreachRDD( (rdd: RDD[(String, Iterable[String])]) => rdd.foreach { tup =>
-      log.info(tup._2.reduceLeft( (acc, s) => acc + " " + s))
-    })
+    //val grouped: DStream[(String, Iterable[String])] = greetingList
+    //val grouped: DStream[(String, CurrentState)] = greetingList
+    greetingList
+      .union(dateList)
+      .updateStateByKey[CurrentState](updateFunction _)
+      .filter(tup => tup._2._1 == 2)
+      .foreachRDD((rdd: RDD[(String, CurrentState)]) => rdd.foreach { tup =>
+        log.info(s"${tup._1} -> ${tup._2._1} ${tup._2._2}")
+      })
+    //.groupByKey()
+    //.filter( gbk => gbk._2.size > 1)
+    //.groupByKeyAndWindow(Seconds(60), Seconds(180)).cache()
 
     log.info("Stream processing logic end")
     // Start the streaming
@@ -119,7 +168,7 @@ object LogSettings {
   /**
     * Necessary log4j logging level settings are done
     */
-  def setLogLevels():Unit = {
+  def setLogLevels(): Unit = {
     val log4jInitialized = Logger.getRootLogger.getAllAppenders.hasMoreElements
     if (!log4jInitialized) {
       // This is to make sure that the console is clean from other INFO messages printed by Spark
